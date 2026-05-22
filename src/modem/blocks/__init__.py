@@ -13,7 +13,10 @@ from .modulators import (
     PrependBit, DifferentialEncoder, DifferentialDecoder, DBPSKDemodulator,
     DummyModulator, DummyDemodulator, IQModulator, IQDemodulator 
 )
-from .channel import AWGNChannel, AttenuationChannel, RayleighFlatFadingChannel, MultipathChannel, NoChannel
+from .channel import (AWGNChannel, AttenuationChannel, 
+                      RayleighFlatFadingChannel, MultipathChannel, 
+                      NoChannel, DopplerChannel, FrequencyCorrector
+)
 from .coding import HammingCoder, HammingDecoder, DummyCoder, DummyDecoder
 from .equalizers import LMSLinearEqualizer
 
@@ -30,10 +33,10 @@ __all__ = [
     "BFSKModulator", "BFSKDemodulator", "DBFSKDemodulator",
     "QPSKModulator", "QPSKDemodulator", "DQPSKModulator", "DQPSKDemodulator",
     "PrependBit", "DifferentialEncoder", "DifferentialDecoder", "DBPSKDemodulator",
-     "DummyModulator", "DummyDemodulator",  "IQModulator", "IQDemodulator" ,
+    "DummyModulator", "DummyDemodulator",  "IQModulator", "IQDemodulator" ,
     # Каналы
     "AWGNChannel", "AttenuationChannel", "RayleighFlatFadingChannel", 
-    "NoChannel","MultipathChannel",
+    "NoChannel","MultipathChannel","DopplerChannel", "FrequencyCorrector",
     # Кодеры
     "HammingCoder", "DummyCoder", "DummyDecoder", "HammingDecoder",
     # Эквалайзеры

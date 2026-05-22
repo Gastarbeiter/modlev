@@ -351,3 +351,127 @@ class IQDemodulator(Block[np.ndarray, np.ndarray]):
         # 'same' сохраняет длину, но края могут быть неточными
         filtered = np.convolve(complex_baseband, window, mode='same')
         return filtered
+from scipy.signal import gaussian, convolve
+
+@dataclass
+class GFSKModulator(Block[np.ndarray, np.ndarray]):
+    """GFSK модулятор с гауссовским сглаживанием.
+
+    Параметры:
+        bt: произведение bandwidth * bit_period (обычно 0.3–0.5).
+        deviation_hz: пиковая девиация частоты (Гц). Полный разнос тонов = 2*deviation_hz.
+        samples_per_symbol: число семплов на бит.
+        fs: частота дискретизации (Гц).
+        modulation_index: h = 2 * deviation_hz / bit_rate. Если None, рассчитывается автоматически.
+    """
+    bt: float = 0.5                # BT product
+    deviation_hz: float = 25.0     # девиация (разнос = 50 Гц)
+    samples_per_symbol: int = 20
+    fs: Optional[float] = None
+    modulation_index: Optional[float] = None
+
+    def __post_init__(self):
+        # Длина гауссова фильтра в символах (обычно 3/BT)
+        self._filter_span = int(3 / self.bt)
+        # Длина фильтра в отсчётах
+        self._filter_len = self._filter_span * self.samples_per_symbol
+
+        # Создаём гауссово окно
+        # Стандартное отклонение σ связано с BT: σ = sqrt(ln(2)) / (2π·BT) в символах
+        sigma_sym = np.sqrt(np.log(2)) / (2 * np.pi * self.bt)
+        sigma_samp = sigma_sym * self.samples_per_symbol
+        t = np.arange(-self._filter_len//2, self._filter_len//2 + 1)
+        g = np.exp(-0.5 * (t / sigma_samp) ** 2)
+        self._gaussian_filter = g / np.sum(g)   # нормируем
+
+    def process(self, bits: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
+        if bits.dtype != np.uint8:
+            raise TypeError("Expected uint8 bits")
+        if ctx is None:
+            ctx = {}
+        fs = self.fs or ctx.get("fs")
+        if fs is None:
+            raise ValueError("fs must be provided")
+
+        sps = self.samples_per_symbol
+        # Формируем последовательность импульсов (NRZ: 0->-1, 1->+1)
+        symbols = 2.0 * bits.astype(np.float64) - 1.0   # ±1
+        # Повышаем частоту до sps, вставляя нули (или повторяя? для фильтра Гаусса нужно upsample с нулями)
+        # Правильный подход: повторяем символы, потом фильтруем. В GFSK обычно символы повторяются, затем фильтруются.
+        upsampled = np.repeat(symbols, sps)
+
+        # Применяем гауссовский фильтр
+        filtered = convolve(upsampled, self._gaussian_filter, mode='same')
+
+        # Нормируем отклик фильтра так, чтобы максимальное отклонение частоты было deviation_hz
+        # filtered масштабируется так, чтобы максимальное значение соответствовало deviation_hz
+        # (для одиночного символа отклик фильтра в центре ≈ 1, если фильтр нормирован)
+        freq = filtered * self.deviation_hz / np.max(np.abs(filtered))
+
+        # Интегрируем частоту для получения фазы
+        phase = 2 * np.pi * np.cumsum(freq) / fs
+        return np.exp(1j * phase)
+@dataclass
+class BLE_GFSK_Modulator(Block[np.ndarray, np.ndarray]):
+    """GFSK модулятор, совместимый с Bluetooth LE (1 Мбит/с, BT=0.5, h=0.5).
+
+    Вход: массив бит uint8 (LSB first для каждого байта).
+    Выход: комплексная огибающая, частота дискретизации fs (обычно 8 МГц → 8 сэмплов/бит).
+    """
+    fs: float = 8e6          # частота дискретизации
+    bt: float = 0.5
+    deviation_hz: float = 250e3   # пиковая девиация (половина разноса)
+    samples_per_symbol: int = 8   # sps = fs / 1e6
+
+    def process(self, bits: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
+        if bits.dtype != np.uint8:
+            raise TypeError("Expected uint8 bits")
+
+        sps = self.samples_per_symbol
+        # Создаём гауссовский фильтр
+        sigma_sym = np.sqrt(np.log(2)) / (2 * np.pi * self.bt)  # в символах
+        sigma_samp = sigma_sym * sps
+        filter_span = int(3 / self.bt)  # длительность в символах
+        filter_len = filter_span * sps
+        t_filt = np.arange(-filter_len//2, filter_len//2 + 1)
+        g = np.exp(-0.5 * (t_filt / sigma_samp) ** 2)
+        g /= g.sum()
+
+        # Преобразуем биты в NRZ: 0 -> -1, 1 -> +1
+        symbols = 2.0 * bits.astype(np.float64) - 1.0
+        upsampled = np.repeat(symbols, sps)
+
+        # Фильтрация
+        filtered = np.convolve(upsampled, g, mode='same')
+
+        # Масштабируем, чтобы в установившемся режиме частота менялась на ±deviation_hz
+        # после нормализации фильтра максимальный отклик на одиночный символ ≈ 1
+        freq = filtered * self.deviation_hz / np.max(np.abs(filtered))
+
+        # Интегрируем частоту для фазы
+        phase = 2 * np.pi * np.cumsum(freq) / self.fs
+        return np.exp(1j * phase)
+@dataclass
+class BLE_GFSK_Demodulator(Block[np.ndarray, np.ndarray]):
+    fs: float = 8e6
+    deviation_hz: float = 250e3
+    sps: int = 8
+
+    def process(self, signal: np.ndarray, *, ctx=None) -> np.ndarray:
+        if ctx is None:
+            ctx = {}
+        fs = self.fs or ctx.get("fs")
+        if fs is None:
+            raise ValueError("fs must be provided")
+        sps = self.samples_per_symbol
+        n_bits = len(signal) // sps
+        signal = signal[:n_bits * sps].reshape(n_bits, sps)
+        t = np.arange(sps) / fs
+        tone0_conj = np.exp(1j * 2 * np.pi * self.deviation_hz * t)
+        tone1_conj = np.exp(-1j * 2 * np.pi * self.deviation_hz * t)
+        corr0 = np.abs(np.sum(signal * tone0_conj, axis=1))
+        corr1 = np.abs(np.sum(signal * tone1_conj, axis=1))
+        bits = (corr1 > corr0).astype(np.uint8)
+        if self.invert:
+            bits = 1 - bits
+        return bits

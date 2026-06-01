@@ -11,7 +11,7 @@ from .modulators import (
     BFSKModulator, BFSKDemodulator, DBFSKDemodulator,
     QPSKModulator, QPSKDemodulator, DQPSKModulator, DQPSKDemodulator,
     PrependBit, DifferentialEncoder, DifferentialDecoder, DBPSKDemodulator,
-    DummyModulator, DummyDemodulator, IQModulator, IQDemodulator,  GFSKModulator, BLE_GFSK_Modulator, BLE_GFSK_Demodulator 
+    DummyModulator, DummyDemodulator, IQModulator, IQDemodulator,  GFSKModulator, BLE_GFSK_Modulator, BLE_GFSK_Demodulator, PreambleCorrelator, 
 )
 from .channel import (AWGNChannel, AttenuationChannel, 
                       RayleighFlatFadingChannel, MultipathChannel, 
@@ -33,7 +33,8 @@ __all__ = [
     "BFSKModulator", "BFSKDemodulator", "DBFSKDemodulator",
     "QPSKModulator", "QPSKDemodulator", "DQPSKModulator", "DQPSKDemodulator",
     "PrependBit", "DifferentialEncoder", "DifferentialDecoder", "DBPSKDemodulator",
-    "DummyModulator", "DummyDemodulator",  "IQModulator", "IQDemodulator" , "GFSKModulator","BLE_GFSK_Modulator","BLE_GFSK_Demodulator",
+    "DummyModulator", "DummyDemodulator",  "IQModulator", "IQDemodulator" , "GFSKModulator",
+    "PreambleCorrelator","BLE_GFSK_Modulator","BLE_GFSK_Demodulator",
     # Каналы
     "AWGNChannel", "AttenuationChannel", "RayleighFlatFadingChannel", 
     "NoChannel","MultipathChannel","DopplerChannel", "FrequencyCorrector",

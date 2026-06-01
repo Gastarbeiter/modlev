@@ -351,38 +351,23 @@ class IQDemodulator(Block[np.ndarray, np.ndarray]):
         # 'same' сохраняет длину, но края могут быть неточными
         filtered = np.convolve(complex_baseband, window, mode='same')
         return filtered
-from scipy.signal import gaussian, convolve
 
 @dataclass
 class GFSKModulator(Block[np.ndarray, np.ndarray]):
-    """GFSK модулятор с гауссовским сглаживанием.
-
-    Параметры:
-        bt: произведение bandwidth * bit_period (обычно 0.3–0.5).
-        deviation_hz: пиковая девиация частоты (Гц). Полный разнос тонов = 2*deviation_hz.
-        samples_per_symbol: число семплов на бит.
-        fs: частота дискретизации (Гц).
-        modulation_index: h = 2 * deviation_hz / bit_rate. Если None, рассчитывается автоматически.
-    """
-    bt: float = 0.5                # BT product
-    deviation_hz: float = 25.0     # девиация (разнос = 50 Гц)
+    bt: float = 0.5
+    deviation_hz: float = 25.0
     samples_per_symbol: int = 20
     fs: Optional[float] = None
-    modulation_index: Optional[float] = None
 
     def __post_init__(self):
-        # Длина гауссова фильтра в символах (обычно 3/BT)
-        self._filter_span = int(3 / self.bt)
-        # Длина фильтра в отсчётах
-        self._filter_len = self._filter_span * self.samples_per_symbol
-
-        # Создаём гауссово окно
-        # Стандартное отклонение σ связано с BT: σ = sqrt(ln(2)) / (2π·BT) в символах
+        sps = self.samples_per_symbol
         sigma_sym = np.sqrt(np.log(2)) / (2 * np.pi * self.bt)
-        sigma_samp = sigma_sym * self.samples_per_symbol
-        t = np.arange(-self._filter_len//2, self._filter_len//2 + 1)
+        sigma_samp = sigma_sym * sps
+        filter_span = int(3 / self.bt)   # в символах
+        filter_len = filter_span * sps
+        t = np.arange(-filter_len//2, filter_len//2 + 1)
         g = np.exp(-0.5 * (t / sigma_samp) ** 2)
-        self._gaussian_filter = g / np.sum(g)   # нормируем
+        self._gaussian_filter = g / np.sum(g)
 
     def process(self, bits: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
         if bits.dtype != np.uint8:
@@ -392,25 +377,14 @@ class GFSKModulator(Block[np.ndarray, np.ndarray]):
         fs = self.fs or ctx.get("fs")
         if fs is None:
             raise ValueError("fs must be provided")
-
         sps = self.samples_per_symbol
-        # Формируем последовательность импульсов (NRZ: 0->-1, 1->+1)
-        symbols = 2.0 * bits.astype(np.float64) - 1.0   # ±1
-        # Повышаем частоту до sps, вставляя нули (или повторяя? для фильтра Гаусса нужно upsample с нулями)
-        # Правильный подход: повторяем символы, потом фильтруем. В GFSK обычно символы повторяются, затем фильтруются.
+        symbols = 2.0 * bits.astype(np.float64) - 1.0
         upsampled = np.repeat(symbols, sps)
-
-        # Применяем гауссовский фильтр
-        filtered = convolve(upsampled, self._gaussian_filter, mode='same')
-
-        # Нормируем отклик фильтра так, чтобы максимальное отклонение частоты было deviation_hz
-        # filtered масштабируется так, чтобы максимальное значение соответствовало deviation_hz
-        # (для одиночного символа отклик фильтра в центре ≈ 1, если фильтр нормирован)
+        filtered = np.convolve(upsampled, self._gaussian_filter, mode='same')
         freq = filtered * self.deviation_hz / np.max(np.abs(filtered))
-
-        # Интегрируем частоту для получения фазы
         phase = 2 * np.pi * np.cumsum(freq) / fs
         return np.exp(1j * phase)
+    
 @dataclass
 class BLE_GFSK_Modulator(Block[np.ndarray, np.ndarray]):
     """GFSK модулятор, совместимый с Bluetooth LE (1 Мбит/с, BT=0.5, h=0.5).
@@ -453,25 +427,108 @@ class BLE_GFSK_Modulator(Block[np.ndarray, np.ndarray]):
         return np.exp(1j * phase)
 @dataclass
 class BLE_GFSK_Demodulator(Block[np.ndarray, np.ndarray]):
-    fs: float = 8e6
-    deviation_hz: float = 250e3
-    sps: int = 8
+    """
+    Демодулятор BLE GFSK.
 
-    def process(self, signal: np.ndarray, *, ctx=None) -> np.ndarray:
-        if ctx is None:
-            ctx = {}
-        fs = self.fs or ctx.get("fs")
-        if fs is None:
-            raise ValueError("fs must be provided")
-        sps = self.samples_per_symbol
-        n_bits = len(signal) // sps
-        signal = signal[:n_bits * sps].reshape(n_bits, sps)
-        t = np.arange(sps) / fs
-        tone0_conj = np.exp(1j * 2 * np.pi * self.deviation_hz * t)
-        tone1_conj = np.exp(-1j * 2 * np.pi * self.deviation_hz * t)
-        corr0 = np.abs(np.sum(signal * tone0_conj, axis=1))
-        corr1 = np.abs(np.sum(signal * tone1_conj, axis=1))
-        bits = (corr1 > corr0).astype(np.uint8)
-        if self.invert:
-            bits = 1 - bits
-        return bits
+    Параметры:
+        sps         - количество отсчётов на символ
+        sync_bits   - известная битовая последовательность
+                      (лучше использовать Access Address)
+        invert      - инверсия битов при необходимости
+    """
+
+    sps: int = 8
+    sync_bits: Optional[np.ndarray] = None
+    invert: bool = False
+
+    def process(
+        self,
+        signal: np.ndarray,
+        *,
+        ctx: Optional[dict[str, Any]] = None
+    ) -> np.ndarray:
+
+        if len(signal) < self.sps:
+            return np.array([], dtype=np.uint8)
+
+        # --------------------------------------------------
+        # FM discriminator
+        # --------------------------------------------------
+
+        freq = np.angle(
+            signal[1:] * np.conj(signal[:-1])
+        )
+
+        best_bits = None
+        best_score = -np.inf
+
+        # --------------------------------------------------
+        # Поиск лучшего смещения внутри символа
+        # --------------------------------------------------
+
+        for offset in range(self.sps):
+
+            x = freq[offset:]
+
+            n_bits = len(x) // self.sps
+
+            if n_bits < 10:
+                continue
+
+            x = x[:n_bits * self.sps]
+
+            symbols = x.reshape(n_bits, self.sps)
+
+            metric = np.mean(symbols, axis=1)
+
+            bits = (metric > 0).astype(np.uint8)
+
+            if self.invert:
+                bits = 1 - bits
+
+            # --------------------------------------------------
+            # Оценка качества по корреляции
+            # --------------------------------------------------
+
+            if self.sync_bits is not None:
+
+                if len(bits) < len(self.sync_bits):
+                    continue
+
+                bits_pm = 2 * bits.astype(np.int16) - 1
+                sync_pm = 2 * self.sync_bits.astype(np.int16) - 1
+
+                corr = np.correlate(
+                    bits_pm,
+                    sync_pm,
+                    mode="valid"
+                )
+
+                score = np.max(np.abs(corr))
+
+            else:
+
+                score = np.sum(
+                    bits[:-1] != bits[1:]
+                )
+
+            if score > best_score:
+                best_score = score
+                best_bits = bits
+
+        if best_bits is None:
+            return np.array([], dtype=np.uint8)
+
+        return best_bits
+class PreambleCorrelator(Block[np.ndarray, np.ndarray]):
+    """Вычисляет взаимную корреляцию входного сигнала с идеальной преамбулой.
+
+    Вход: комплексные отсчёты (возможно, зашумлённые).
+    Выход: значения корреляции (1D массив той же длины).
+    """
+    preamble_signal: np.ndarray = None   # идеальный сигнал преамбулы (комплексный)
+
+    def process(self, x: np.ndarray, *, ctx=None) -> np.ndarray:
+        if self.preamble_signal is None:
+            raise ValueError("preamble_signal must be set")
+        return np.correlate(x, self.preamble_signal, mode='same')

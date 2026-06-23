@@ -354,34 +354,52 @@ class IQDemodulator(Block[np.ndarray, np.ndarray]):
 
 @dataclass
 class GFSKModulator(Block[np.ndarray, np.ndarray]):
+    """Универсальный GFSK модулятор (подходит для BLE и других систем).
+
+    Параметры:
+        bt: BT product (полоса фильтра * длительность бита)
+        deviation_hz: пиковая девиация частоты (половина разноса тонов)
+        samples_per_symbol: число семплов на бит
+        fs: частота дискретизации (если None – берётся из ctx['fs'])
+    """
     bt: float = 0.5
-    deviation_hz: float = 25.0
-    samples_per_symbol: int = 20
+    deviation_hz: float = 250e3
+    samples_per_symbol: int = 8
     fs: Optional[float] = None
 
     def __post_init__(self):
         sps = self.samples_per_symbol
-        sigma_sym = np.sqrt(np.log(2)) / (2 * np.pi * self.bt)
+        # Расчёт гауссовского фильтра
+        sigma_sym = np.sqrt(np.log(2)) / (2 * np.pi * self.bt)   # стандартное отклонение в символах
         sigma_samp = sigma_sym * sps
-        filter_span = int(3 / self.bt)   # в символах
+        filter_span = int(3 / self.bt)  # длительность фильтра в символах
         filter_len = filter_span * sps
         t = np.arange(-filter_len//2, filter_len//2 + 1)
         g = np.exp(-0.5 * (t / sigma_samp) ** 2)
-        self._gaussian_filter = g / np.sum(g)
+        self._gaussian_filter = g / np.sum(g)   # нормировка фильтра
 
     def process(self, bits: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
         if bits.dtype != np.uint8:
             raise TypeError("Expected uint8 bits")
-        if ctx is None:
-            ctx = {}
-        fs = self.fs or ctx.get("fs")
+
+        # Частота дискретизации (из параметра или контекста)
+        fs = self.fs or (ctx.get("fs") if ctx else None)
         if fs is None:
-            raise ValueError("fs must be provided")
+            raise ValueError("fs must be provided either as field or in ctx")
+
         sps = self.samples_per_symbol
+
+        # Преобразуем биты в NRZ: 0 -> -1, 1 -> +1
         symbols = 2.0 * bits.astype(np.float64) - 1.0
         upsampled = np.repeat(symbols, sps)
+
+        # Фильтрация гауссовым фильтром
         filtered = np.convolve(upsampled, self._gaussian_filter, mode='same')
+
+        # Нормировка амплитуды фильтра: максимальный отклик на одиночный символ должен давать deviation_hz
         freq = filtered * self.deviation_hz / np.max(np.abs(filtered))
+
+        # Интегрирование частоты для получения фазы
         phase = 2 * np.pi * np.cumsum(freq) / fs
         return np.exp(1j * phase)
     
@@ -425,21 +443,19 @@ class BLE_GFSK_Modulator(Block[np.ndarray, np.ndarray]):
         # Интегрируем частоту для фазы
         phase = 2 * np.pi * np.cumsum(freq) / self.fs
         return np.exp(1j * phase)
+from dataclasses import dataclass
+from typing import Optional, Any
+
+import numpy as np
+
+
 @dataclass
 class BLE_GFSK_Demodulator(Block[np.ndarray, np.ndarray]):
-    """
-    Демодулятор BLE GFSK.
-
-    Параметры:
-        sps         - количество отсчётов на символ
-        sync_bits   - известная битовая последовательность
-                      (лучше использовать Access Address)
-        invert      - инверсия битов при необходимости
-    """
 
     sps: int = 8
     sync_bits: Optional[np.ndarray] = None
     invert: bool = False
+    fixed_offset: Optional[int] = None
 
     def process(
         self,
@@ -451,52 +467,91 @@ class BLE_GFSK_Demodulator(Block[np.ndarray, np.ndarray]):
         if len(signal) < self.sps:
             return np.array([], dtype=np.uint8)
 
-        # --------------------------------------------------
+        # ==========================================
         # FM discriminator
-        # --------------------------------------------------
+        # ==========================================
 
         freq = np.angle(
             signal[1:] * np.conj(signal[:-1])
         )
 
+        # удаляем постоянную составляющую
+        freq = freq - np.mean(freq)
+
+        # ==========================================
+        # Matched filter
+        # ==========================================
+
+        mf = np.ones(self.sps) / self.sps
+
+        freq = np.convolve(
+            freq,
+            mf,
+            mode="same"
+        )
+
+        # ==========================================
+        # Выбор offset
+        # ==========================================
+
+        offsets = (
+            [self.fixed_offset]
+            if self.fixed_offset is not None
+            else range(self.sps)
+        )
+
         best_bits = None
         best_score = -np.inf
+        best_offset = None
 
-        # --------------------------------------------------
-        # Поиск лучшего смещения внутри символа
-        # --------------------------------------------------
-
-        for offset in range(self.sps):
+        for offset in offsets:
 
             x = freq[offset:]
 
             n_bits = len(x) // self.sps
 
-            if n_bits < 10:
+            if n_bits < 20:
                 continue
 
             x = x[:n_bits * self.sps]
 
-            symbols = x.reshape(n_bits, self.sps)
+            symbols = x.reshape(
+                n_bits,
+                self.sps
+            )
 
-            metric = np.mean(symbols, axis=1)
+            # интеграл по символу
+            metric = np.sum(
+                symbols,
+                axis=1
+            )
 
-            bits = (metric > 0).astype(np.uint8)
+            # динамический порог
+            threshold = np.mean(metric)
+
+            bits = (
+                metric > threshold
+            ).astype(np.uint8)
 
             if self.invert:
                 bits = 1 - bits
 
-            # --------------------------------------------------
-            # Оценка качества по корреляции
-            # --------------------------------------------------
+            # ----------------------------------
+            # Оценка качества
+            # ----------------------------------
 
             if self.sync_bits is not None:
 
                 if len(bits) < len(self.sync_bits):
                     continue
 
-                bits_pm = 2 * bits.astype(np.int16) - 1
-                sync_pm = 2 * self.sync_bits.astype(np.int16) - 1
+                bits_pm = (
+                    2 * bits.astype(np.int16) - 1
+                )
+
+                sync_pm = (
+                    2 * self.sync_bits.astype(np.int16) - 1
+                )
 
                 corr = np.correlate(
                     bits_pm,
@@ -504,20 +559,36 @@ class BLE_GFSK_Demodulator(Block[np.ndarray, np.ndarray]):
                     mode="valid"
                 )
 
-                score = np.max(np.abs(corr))
+                score = np.max(
+                    np.abs(corr)
+                )
+
+                peak = np.argmax(
+                    np.abs(corr)
+                )
+
+                print(
+                    f"offset={offset} "
+                    f"score={score} "
+                    f"peak={peak}"
+                )
 
             else:
 
-                score = np.sum(
-                    bits[:-1] != bits[1:]
-                )
+                score = np.var(metric)
 
             if score > best_score:
+
                 best_score = score
                 best_bits = bits
+                best_offset = offset
 
         if best_bits is None:
             return np.array([], dtype=np.uint8)
+
+        print(
+            f"\nВыбран offset = {best_offset}"
+        )
 
         return best_bits
 class PreambleCorrelator(Block[np.ndarray, np.ndarray]):

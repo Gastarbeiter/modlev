@@ -82,3 +82,42 @@ class MultipathChannel(Block[np.ndarray, np.ndarray]):
         for delay, coeff in self.taps:
             out[delay:delay+len(x)] += np.array(coeff) * x
         return out[:len(x)]
+
+@dataclass
+class DopplerChannel(Block[np.ndarray, np.ndarray]):
+    """Постоянный сдвиг частоты (эффект Допплера).
+
+    Вход: комплексный или вещественный сигнал.
+    Выход: сигнал с добавленным частотным сдвигом.
+
+    Параметры:
+        freq_offset_hz: сдвиг частоты в Гц.
+    """
+    freq_offset_hz: float = 0.0
+
+    def process(self, x: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
+        if ctx is None or "fs" not in ctx:
+            raise ValueError("ctx['fs'] required for DopplerChannel")
+        fs = ctx["fs"]
+        t = np.arange(len(x)) / fs
+        return x * np.exp(1j * 2.0 * np.pi * self.freq_offset_hz * t)
+
+
+@dataclass
+class FrequencyCorrector(Block[np.ndarray, np.ndarray]):
+    """Ручная компенсация сдвига частоты.
+
+    Вход: сигнал со сдвигом частоты.
+    Выход: сигнал с обратным сдвигом.
+
+    Параметры:
+        freq_offset_hz: сдвиг, который нужно скомпенсировать (Гц).
+    """
+    freq_offset_hz: float = 0.0
+
+    def process(self, x: np.ndarray, *, ctx: Optional[dict[str, Any]] = None) -> np.ndarray:
+        if ctx is None or "fs" not in ctx:
+            raise ValueError("ctx['fs'] required for FrequencyCorrector")
+        fs = ctx["fs"]
+        t = np.arange(len(x)) / fs
+        return x * np.exp(-1j * 2.0 * np.pi * self.freq_offset_hz * t)
